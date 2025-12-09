@@ -29,12 +29,17 @@ def load_zip_export(zip_dir: Path):
     if not messages_path.exists():
         return None, None, None
 
-    messages = json.load(open(messages_path, "r", encoding="utf-8"))
-    metadata = (
-        json.load(open(metadata_path, "r", encoding="utf-8"))
-        if metadata_path.exists()
-        else None
-    )
+    with messages_path.open("r", encoding="utf-8") as f:
+        messages = json.load(f)
+
+    metadata = None
+    if metadata_path.exists():
+        try:
+            with metadata_path.open("r", encoding="utf-8") as f:
+                metadata = json.load(f)
+        except Exception:
+            metadata = None
+
     attachments = attachments_path if attachments_path.exists() else None
 
     # If JSON is dict with "messages" key
@@ -52,41 +57,55 @@ def load_json(uploaded_json):
     return data
 
 
-def parse_ts(ts):
+def parse_ts(ts: str | None):
+    if not ts:
+        return None
     try:
         return datetime.fromisoformat(ts)
-    except:
+    except Exception:
         return None
 
 
+def html_escape(text: str) -> str:
+    """Very simple HTML escape + line breaks."""
+    if text is None:
+        return ""
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\n", "<br>")
+    )
+
+
 def render_attachment(att, attachments_dir: Path | None):
-    """Render attachment HTML block."""
+    """Render a single attachment HTML block."""
     filename = att.get("filename", "attachment")
     saved_as = att.get("saved_as", filename)
     url = att.get("url", "")
     content_type = att.get("content_type", "")
 
-    # If ZIP attachments exist, try local file first
-    if attachments_dir:
-        local_file = attachments_dir / saved_as
-    else:
-        local_file = None
+    local_file = None
+    if attachments_dir is not None:
+        candidate = attachments_dir / saved_as
+        if candidate.exists():
+            local_file = candidate
 
     # Images
     if content_type.startswith("image/"):
         img_src = None
 
-        # Try local base64
-        if local_file and local_file.exists():
+        # Try local base64 first (when ZIP + attachments are available)
+        if local_file:
             try:
                 data = local_file.read_bytes()
                 b64 = base64.b64encode(data).decode("utf-8")
                 img_src = f"data:{content_type};base64,{b64}"
-            except:
+            except Exception:
                 img_src = None
 
         # Fallback to URL
-        if not img_src:
+        if not img_src and url:
             img_src = url
 
         if img_src:
@@ -94,23 +113,31 @@ def render_attachment(att, attachments_dir: Path | None):
                 <div class="attachment">
                     <div class="attachment-label">Image:</div>
                     <img src="{img_src}" class="attachment-image"/>
-                    <div class="attachment-filename">{filename}</div>
+                    <div class="attachment-filename">{html_escape(filename)}</div>
                 </div>
             """
 
-    # Non-image fallback
+        # If no src at all:
+        return f"""
+            <div class="attachment">
+                <span class="attachment-label">Image:</span>
+                <span class="attachment-filename">{html_escape(filename)}</span>
+            </div>
+        """
+
+    # Non-image attachments
     if url:
         return f"""
             <div class="attachment">
                 <span class="attachment-label">Attachment:</span>
-                <a href="{url}" target="_blank" class="attachment-link">{filename}</a>
+                <a href="{url}" target="_blank" class="attachment-link">{html_escape(filename)}</a>
             </div>
         """
     else:
         return f"""
             <div class="attachment">
                 <span class="attachment-label">Attachment:</span>
-                <span>{filename}</span>
+                <span>{html_escape(filename)}</span>
             </div>
         """
 
@@ -123,24 +150,22 @@ def render_message(msg, attachments_dir):
     dt = parse_ts(created_at)
     timestamp = dt.strftime("%Y-%m-%d %H:%M") if dt else ""
 
-    content_html = (
-        content.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace("\n", "<br>")
-    )
+    content_html = html_escape(content)
 
     attachments_html = ""
     for att in msg.get("attachments", []):
         attachments_html += render_attachment(att, attachments_dir)
 
+    avatar_letter = html_escape(author[:1].upper() if author else "?")
+    author_html = html_escape(author)
+
     return f"""
         <div class="message">
-            <div class="avatar">{author[:1].upper()}</div>
+            <div class="avatar">{avatar_letter}</div>
             <div class="message-content">
                 <div class="message-header">
-                    <span class="author-name">{author}</span>
-                    <span class="timestamp">{timestamp}</span>
+                    <span class="author-name">{author_html}</span>
+                    <span class="timestamp">{html_escape(timestamp)}</span>
                 </div>
                 <div class="message-body">{content_html}</div>
                 {attachments_html}
@@ -154,22 +179,100 @@ def inject_css():
     st.markdown(
         """
         <style>
-            body { background-color: #2f3136; }
-            .discord-container { padding: 1rem; background-color: #2f3136; }
-            .message { display: flex; padding: 0.5rem; color: #dcddde; }
+            body {
+                background-color: #2f3136;
+            }
+
+            .discord-window {
+                max-height: 600px;            /* fixed-height preview window */
+                overflow-y: auto;             /* vertical scrollbar */
+                border: 1px solid #202225;
+                border-radius: 10px;
+                background-color: #2f3136;
+                padding: 0.5rem 0;
+            }
+
+            .discord-container {
+                background-color: #2f3136;
+                padding: 0.25rem 0.75rem 0.75rem 0.75rem;
+            }
+
+            .message {
+                display: flex;
+                padding: 0.35rem 0;
+                color: #dcddde;
+                font-family: system-ui, -apple-system, BlinkMacSystemFont,
+                             "Segoe UI", sans-serif;
+            }
+
             .avatar {
-                width: 40px; height: 40px;
-                border-radius: 50%; background-color: #5865f2;
-                display: flex; align-items: center; justify-content: center;
-                margin-right: 0.75rem; font-weight: bold;
+                width: 40px;
+                height: 40px;
+                border-radius: 50%;
+                background-color: #5865f2;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                margin-right: 0.75rem;
+                font-weight: bold;
+                flex-shrink: 0;
             }
+
+            .message-content {
+                flex: 1;
+                min-width: 0;
+            }
+
+            .message-header {
+                display: flex;
+                align-items: baseline;
+                gap: 0.35rem;
+            }
+
+            .author-name {
+                font-weight: 600;
+                color: #ffffff;
+            }
+
+            .timestamp {
+                color: #72767d;
+                font-size: 0.8rem;
+            }
+
+            .message-body {
+                margin-top: 0.1rem;
+                font-size: 0.95rem;
+                word-wrap: break-word;
+                white-space: normal;
+            }
+
+            .attachment {
+                margin-top: 0.35rem;
+                font-size: 0.8rem;
+            }
+
+            .attachment-label {
+                color: #72767d;
+                margin-bottom: 0.1rem;
+                display: block;
+            }
+
             .attachment-image {
-                max-width: 260px; max-height: 260px;
-                margin-top: 5px; border-radius: 5px;
+                max-width: 260px;
+                max-height: 260px;
+                border-radius: 6px;
+                display: block;
+                border: 1px solid #202225;
             }
-            .attachment-label { color: #72767d; font-size: 0.8rem; }
-            .timestamp { margin-left: 10px; color: #72767d; font-size: 0.8rem; }
-            .author-name { font-weight: bold; color: white; }
+
+            .attachment-link {
+                color: #00aff4;
+                text-decoration: none;
+            }
+
+            .attachment-link:hover {
+                text-decoration: underline;
+            }
         </style>
         """,
         unsafe_allow_html=True,
@@ -178,10 +281,12 @@ def inject_css():
 
 # ============= MAIN APP =============
 def main():
-    st.title("Discord Export Viewer")
+    st.set_page_config(page_title="Discord Export Viewer", layout="wide")
     inject_css()
 
-    st.write("Upload a **messages.json** or a **Discord export ZIP**")
+    st.title("Discord Export Viewer")
+
+    st.write("Upload either a **messages.json** file or a **Discord export ZIP** (with `messages.json`, `metadata.json`, and `attachments/`).")
 
     # ---------- SIDE BY SIDE UPLOADERS ----------
     col_json, col_zip = st.columns(2)
@@ -197,38 +302,47 @@ def main():
     metadata = None
     attachments_dir = None
 
-    if zip_file:
+    if zip_file is not None:
         if zip_file.size > MAX_UPLOAD_SIZE:
             st.error(
-                f"ZIP file is too large ({zip_file.size/1024/1024:.1f} MB). Limit is 200 MB on Streamlit Cloud.\n"
-                "Please upload messages.json instead."
+                f"ZIP file is too large ({zip_file.size/1024/1024:.1f} MB). "
+                "Streamlit Cloud upload limit is 200 MB. "
+                "Please upload the smaller messages.json instead."
             )
         else:
             st.success("ZIP uploaded → reading full export…")
-            extracted = extract_zip(zip_file)
-            messages, metadata, attachments_dir = load_zip_export(extracted)
+            extracted_dir = extract_zip(zip_file)
+            messages, metadata, attachments_dir = load_zip_export(extracted_dir)
 
-    elif json_file:
+    elif json_file is not None:
         st.success("JSON uploaded → reading messages only…")
         messages = load_json(json_file)
 
     else:
-        st.info("Please upload a file to view messages.")
+        st.info("Please upload either `messages.json` or an export ZIP to begin.")
         return
 
-    # ---------- RENDER ----------
+    # ---------- VALIDATE & SORT ----------
     if not messages:
-        st.error("No messages found in file.")
+        st.error("No messages found in the provided file.")
         return
+
+    # Sort by timestamp if present
+    def sort_key(msg):
+        dt = parse_ts(msg.get("created_at", ""))
+        return dt or datetime.min
+
+    messages = sorted(messages, key=sort_key)
 
     st.subheader(f"Loaded {len(messages)} messages")
 
-    st.markdown('<div class="discord-container">', unsafe_allow_html=True)
+    # ---------- SCROLLABLE CHAT WINDOW ----------
+    st.markdown('<div class="discord-window"><div class="discord-container">', unsafe_allow_html=True)
 
     for msg in messages:
         st.markdown(render_message(msg, attachments_dir), unsafe_allow_html=True)
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
