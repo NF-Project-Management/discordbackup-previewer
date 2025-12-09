@@ -83,7 +83,11 @@ def render_attachment(att, attachments_dir: Path | None):
     filename = att.get("filename", "attachment")
     saved_as = att.get("saved_as", filename)
     url = att.get("url", "")
-    content_type = att.get("content_type", "")
+    # FIX: content_type can be None or missing
+    content_type = att.get("content_type") or ""
+    if not isinstance(content_type, str):
+        content_type = str(content_type)
+    content_type = content_type.lower()
 
     local_file = None
     if attachments_dir is not None:
@@ -111,7 +115,7 @@ def render_attachment(att, attachments_dir: Path | None):
         if img_src:
             return f"""
                 <div class="attachment">
-                    <div class="attachment-label">Image:</div>
+                    <span class="attachment-label">Image:</span>
                     <img src="{img_src}" class="attachment-image"/>
                     <div class="attachment-filename">{html_escape(filename)}</div>
                 </div>
@@ -148,12 +152,14 @@ def render_message(msg, attachments_dir):
     created_at = msg.get("created_at", "")
 
     dt = parse_ts(created_at)
-    timestamp = dt.strftime("%Y-%m-%d %H:%M") if dt else ""
+    # FIX: 12-hour format with AM/PM
+    timestamp = dt.strftime("%Y-%m-%d %I:%M %p") if dt else ""
 
     content_html = html_escape(content)
 
     attachments_html = ""
-    for att in msg.get("attachments", []):
+    # FIX: attachments might be None
+    for att in msg.get("attachments") or []:
         attachments_html += render_attachment(att, attachments_dir)
 
     avatar_letter = html_escape(author[:1].upper() if author else "?")
@@ -286,7 +292,10 @@ def main():
 
     st.title("Discord Export Viewer")
 
-    st.write("Upload either a **messages.json** file or a **Discord export ZIP** (with `messages.json`, `metadata.json`, and `attachments/`).")
+    st.write(
+        "Upload either a **messages.json** file or a **Discord export ZIP** "
+        "(with `messages.json`, `metadata.json`, and `attachments/`)."
+    )
 
     # ---------- SIDE BY SIDE UPLOADERS ----------
     col_json, col_zip = st.columns(2)
@@ -337,7 +346,10 @@ def main():
     st.subheader(f"Loaded {len(messages)} messages")
 
     # ---------- SCROLLABLE CHAT WINDOW ----------
-    st.markdown('<div class="discord-window"><div class="discord-container">', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="discord-window"><div class="discord-container">',
+        unsafe_allow_html=True,
+    )
 
     for msg in messages:
         st.markdown(render_message(msg, attachments_dir), unsafe_allow_html=True)
